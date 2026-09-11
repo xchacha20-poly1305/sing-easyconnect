@@ -31,8 +31,13 @@ type tunnelSession struct {
 	configuration TunnelConfiguration
 
 	dataKeepalive *dataChannelKeepalive
+	// outgoing holds the datagrams the writer goroutine has yet to put on the
+	// upload channel. It belongs to the session because the upload channel
+	// does: a tunnel that ends takes its backlog with it.
+	outgoing *dataPacketQueue[*buf.Buffer]
 
 	writeAccess         sync.Mutex
+	writeFrames         net.Buffers
 	writeDeadlineFailed sync.Once
 	lastWriteTime       atomic.Int64
 	lastInboundTime     atomic.Int64
@@ -52,8 +57,9 @@ func (c *Client) connectTunnel(ctx context.Context, web *webSession) (*tunnelSes
 		destination.Port = web.parameters.tunnelPort
 	}
 	session := &tunnelSession{
-		client: c,
-		done:   make(chan error, 1),
+		client:   c,
+		done:     make(chan error, 1),
+		outgoing: newDataPacketQueue[*buf.Buffer](int(c.options.QueueLength)),
 	}
 	keepaliveStart := c.created
 	if !c.options.KeepAliveSequenceDisguiseDisabled {
@@ -149,6 +155,7 @@ func (s *tunnelSession) Start() error {
 	s.markWritten()
 	s.markInbound()
 	s.ready.Store(true)
+	s.running.Go(s.runOutgoingDataPacketWriter)
 	s.running.Go(s.runKeepalive)
 	s.running.Go(s.runCommandChannel)
 	s.running.Go(s.runReceiveChannel)
@@ -221,16 +228,14 @@ func (s *tunnelSession) TunnelConfiguration() TunnelConfiguration {
 	return s.configuration
 }
 
-func (s *tunnelSession) WriteDataPackets(packets [][]byte) error {
-	return s.WriteDataPacketBuffers(newPacketBuffersFrom(packets))
-}
-
 func (s *tunnelSession) WriteDataPacketBuffers(packetBuffers []*buf.Buffer) error {
 	defer buf.ReleaseMulti(packetBuffers)
 	if !s.ready.Load() {
 		return ErrDataChannelNotReady
 	}
-	frames := make(net.Buffers, 0, len(packetBuffers))
+	s.writeAccess.Lock()
+	defer s.writeAccess.Unlock()
+	frames := s.writeFrames[:0]
 	for index, packetBuffer := range packetBuffers {
 		if s.filter != nil && !s.filter.permits(packetBuffer.Bytes()) {
 			// The gateway drops the tunnel over a datagram it did not publish.
@@ -240,11 +245,12 @@ func (s *tunnelSession) WriteDataPacketBuffers(packetBuffers []*buf.Buffer) erro
 		packetBuffers[index] = frameDataPacket(packetBuffer, s.encoding)
 		frames = append(frames, packetBuffers[index].Bytes())
 	}
+	// WriteTo consumes the slice it is given, so the backing array is kept
+	// here before the write rather than after it.
+	s.writeFrames = frames[:0]
 	if len(frames) == 0 {
 		return nil
 	}
-	s.writeAccess.Lock()
-	defer s.writeAccess.Unlock()
 	// The gateway watches the tunnel through the keepalive channel, so a data
 	// connection the path stopped forwarding is reported by nothing but this
 	// deadline; without it the write would hold until the kernel gives up
@@ -283,8 +289,14 @@ func (s *tunnelSession) Close() error {
 		if s.stopRunning != nil {
 			s.stopRunning()
 		}
+		// The writer goroutine waits on the queue, so it has to be told the
+		// tunnel is over before there is any point waiting for it.
+		s.outgoing.Close()
 		s.closeErr = s.closeChannels()
 		s.running.Wait()
+		// The writer drains the backlog on its way out; this covers a session
+		// that was closed before it ever started one.
+		s.outgoing.Drain((*buf.Buffer).Release)
 	})
 	return s.closeErr
 }

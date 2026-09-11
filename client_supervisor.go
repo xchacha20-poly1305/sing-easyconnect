@@ -18,8 +18,7 @@ const (
 type clientSession interface {
 	Start() error
 	Done() <-chan error
-	WriteDataPackets(packets [][]byte) error
-	WriteDataPacketBuffers(packetBuffers []*buf.Buffer) error
+	EnqueueDataPacketBuffers(packetBuffers []*buf.Buffer) error
 	Fail(err error)
 	Close() error
 	Ready() bool

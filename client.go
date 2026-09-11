@@ -42,10 +42,8 @@ type Client struct {
 	configurationEventWake    chan struct{}
 	configurationEventStopped bool
 
-	droppedOutgoingDataPackets   atomic.Uint64
-	incomingDataPackets          *dataPacketQueue[*buf.Buffer]
-	outgoingDataPackets          *dataPacketQueue[outboundDataPacket]
-	outgoingDataPacketWriterDone chan struct{}
+	droppedOutgoingDataPackets atomic.Uint64
+	incomingDataPackets        *dataPacketQueue[*buf.Buffer]
 
 	lifecycleAccess  sync.Mutex
 	started          bool
@@ -117,7 +115,6 @@ func NewClient(options ClientOptions) (*Client, error) {
 		serverURL:              serverURL,
 		configurationEventWake: make(chan struct{}, 1),
 		incomingDataPackets:    newDataPacketQueue[*buf.Buffer](int(options.QueueLength)),
-		outgoingDataPackets:    newDataPacketQueue[outboundDataPacket](int(options.QueueLength)),
 		stateChanged:           make(chan struct{}),
 	}
 	client.httpClient, client.httpTransport, err = newHTTPClient(client, tlsConfig)
@@ -140,13 +137,11 @@ func (c *Client) Start() error {
 	supervisorContext, cancelSupervisor := context.WithCancel(c.options.Context)
 	c.supervisorCancel = cancelSupervisor
 	c.supervisorDone = make(chan struct{})
-	c.outgoingDataPacketWriterDone = make(chan struct{})
 	c.started = true
 	c.lifecycleAccess.Unlock()
 	if c.options.OnTunnelConfiguration != nil {
 		go c.runTunnelConfigurationDispatcher()
 	}
-	go c.runOutgoingDataPacketWriter()
 	go c.runSupervisor(supervisorContext)
 	return nil
 }
@@ -270,7 +265,7 @@ func (c *Client) readDataPackets(ctx context.Context, maximumPackets int) ([]*bu
 }
 
 func (c *Client) WriteDataPacket(packet []byte) error {
-	return c.WriteDataPackets([][]byte{packet})
+	return c.WriteDataPacketBuffers([]*buf.Buffer{newPacketBufferFrom(packet)})
 }
 
 func (c *Client) WriteDataPackets(packets [][]byte) error {
@@ -289,7 +284,7 @@ func (c *Client) WriteDataPacketBuffers(packetBuffers []*buf.Buffer) error {
 		buf.ReleaseMulti(packetBuffers)
 		return ErrDataChannelNotReady
 	}
-	return c.enqueueOutboundDataPacketBuffers(session, packetBuffers)
+	return session.EnqueueDataPacketBuffers(packetBuffers)
 }
 
 func (c *Client) DroppedOutgoingDataPackets() uint64 {
@@ -372,7 +367,7 @@ func (c *Client) pushIncomingDataPacketContext(ctx context.Context, packetBuffer
 		packetBuffer.Release()
 		return
 	}
-	if c.incomingDataPackets.PushBatch(ctx, []*buf.Buffer{packetBuffer}) == 0 {
+	if !c.incomingDataPackets.Push(ctx, packetBuffer) {
 		packetBuffer.Release()
 	}
 }
@@ -386,11 +381,9 @@ func (c *Client) Close() error {
 		}
 		session := c.currentSession
 		supervisorDone := c.supervisorDone
-		outgoingDataPacketWriterDone := c.outgoingDataPacketWriterDone
 		c.signalStateChangedLocked()
 		c.lifecycleAccess.Unlock()
 		c.incomingDataPackets.Close()
-		c.outgoingDataPackets.Close()
 		c.configurationEventAccess.Lock()
 		c.configurationEventStopped = true
 		c.configurationEvents = nil
@@ -404,9 +397,6 @@ func (c *Client) Close() error {
 		}
 		if supervisorDone != nil {
 			<-supervisorDone
-		}
-		if outgoingDataPacketWriterDone != nil {
-			<-outgoingDataPacketWriterDone
 		}
 		c.httpTransport.CloseIdleConnections()
 		c.incomingDataPackets.Drain((*buf.Buffer).Release)

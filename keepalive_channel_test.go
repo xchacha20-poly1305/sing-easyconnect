@@ -1,7 +1,6 @@
 package easyconnect
 
 import (
-	"context"
 	"testing"
 
 	"github.com/sagernet/sing/common/logger"
@@ -75,7 +74,7 @@ func TestHandleACKQ(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 			channel := &keepaliveChannel{requested: sequence, logger: logger.NOP()}
-			replied, err := channel.handleACKQ(context.Background(), testCase.reply, testCase.requestType)
+			replied, err := channel.handleACKQ(t.Context(), testCase.reply, testCase.requestType)
 			if testCase.wantErr != nil {
 				require.ErrorIs(t, err, testCase.wantErr)
 				require.False(t, replied)

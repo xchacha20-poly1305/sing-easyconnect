@@ -5,76 +5,44 @@ import (
 	E "github.com/sagernet/sing/common/exceptions"
 )
 
-type outboundDataPacket struct {
-	session      clientSession
-	packetBuffer *buf.Buffer
-}
-
-func (c *Client) enqueueOutboundDataPacketBuffers(session clientSession, packetBuffers []*buf.Buffer) error {
-	packets := make([]outboundDataPacket, len(packetBuffers))
-	for index, packetBuffer := range packetBuffers {
-		packets[index] = outboundDataPacket{
-			session:      session,
-			packetBuffer: packetBuffer,
-		}
-	}
-	pushed := c.outgoingDataPackets.TryPushBatch(packets)
-	if pushed == len(packets) {
+func (s *tunnelSession) EnqueueDataPacketBuffers(packetBuffers []*buf.Buffer) error {
+	pushed := s.outgoing.TryPushBatch(packetBuffers)
+	if pushed == len(packetBuffers) {
 		return nil
 	}
-	c.dropOutboundDataPackets(packets[pushed:])
-	if c.outgoingDataPackets.Closed() {
-		return ErrClientClosed
+	s.dropOutboundDataPackets(packetBuffers[pushed:])
+	if s.outgoing.Closed() {
+		return ErrDataChannelNotReady
 	}
 	return nil
 }
 
-func (c *Client) runOutgoingDataPacketWriter() {
-	defer close(c.outgoingDataPacketWriterDone)
-	defer c.outgoingDataPackets.Drain(func(packet outboundDataPacket) {
-		packet.packetBuffer.Release()
-	})
+func (s *tunnelSession) runOutgoingDataPacketWriter() {
+	defer s.outgoing.Drain((*buf.Buffer).Release)
+	var packetBuffers []*buf.Buffer
 	for {
-		packets := c.outgoingDataPackets.Pop(0)
-		if len(packets) == 0 {
-			if c.outgoingDataPackets.Closed() {
+		packetBuffers = s.outgoing.PopInto(packetBuffers, 0)
+		if len(packetBuffers) == 0 {
+			if s.outgoing.Closed() {
 				return
 			}
-			<-c.outgoingDataPackets.Wake()
+			<-s.outgoing.Wake()
 			continue
 		}
-		if c.outgoingDataPackets.Closed() {
-			c.dropOutboundDataPackets(packets)
+		if s.outgoing.Closed() {
+			s.dropOutboundDataPackets(packetBuffers)
 			continue
 		}
-		for len(packets) > 0 {
-			session := packets[0].session
-			count := 1
-			for count < len(packets) && packets[count].session == session {
-				count++
-			}
-			c.writeQueuedOutboundDataPackets(session, packets[:count])
-			packets = packets[count:]
+		// The session releases the buffers and fails itself on a write error,
+		// which the supervisor turns into a reconnection.
+		err := s.WriteDataPacketBuffers(packetBuffers)
+		if err != nil {
+			s.client.options.Logger.Debug(E.Cause(err, "write outbound data packets"))
 		}
 	}
 }
 
-func (c *Client) writeQueuedOutboundDataPackets(session clientSession, packets []outboundDataPacket) {
-	packetBuffers := make([]*buf.Buffer, len(packets))
-	for index, packet := range packets {
-		packetBuffers[index] = packet.packetBuffer
-	}
-	// The session releases the buffers and fails itself on a write error, which
-	// the supervisor turns into a reconnection.
-	err := session.WriteDataPacketBuffers(packetBuffers)
-	if err != nil {
-		c.options.Logger.Debug(E.Cause(err, "write outbound data packets"))
-	}
-}
-
-func (c *Client) dropOutboundDataPackets(packets []outboundDataPacket) {
-	for _, packet := range packets {
-		packet.packetBuffer.Release()
-	}
-	c.droppedOutgoingDataPackets.Add(uint64(len(packets)))
+func (s *tunnelSession) dropOutboundDataPackets(packetBuffers []*buf.Buffer) {
+	buf.ReleaseMulti(packetBuffers)
+	s.client.droppedOutgoingDataPackets.Add(uint64(len(packetBuffers)))
 }
