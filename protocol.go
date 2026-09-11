@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/hex"
+	"io"
 
 	E "github.com/sagernet/sing/common/exceptions"
 )
@@ -25,6 +26,12 @@ const (
 	jjyyTailLength    = 11
 	aabbMessageLength = 40
 	ipcpHeaderLength  = 12
+
+	// maximumIPCPPayloadLength is the largest IPv4 datagram an IPCP frame can
+	// carry, the range of the IPv4 total length field. A frame that claims more
+	// is a desynchronized stream, and reading it would allocate whatever the
+	// length field asked for.
+	maximumIPCPPayloadLength = 65535
 )
 
 // TIMQ message types on the TCP keepalive channel.
@@ -85,15 +92,16 @@ func (id sessionID) String() string {
 	return string(id[:])
 }
 
-// encodeTIMQ writes a keepalive request.
+// writeTIMQ writes a keepalive request.
 // Fields are big-endian, unlike every other message in this protocol.
-func encodeTIMQ(messageType uint32, sequence uint32, session sessionID) []byte {
-	message := make([]byte, timqMessageLength)
+func writeTIMQ(writer io.Writer, messageType uint32, sequence uint32, session sessionID) error {
+	var message [timqMessageLength]byte
 	copy(message[0:4], magicTIMQ[:])
 	binary.BigEndian.PutUint32(message[4:8], messageType)
 	binary.BigEndian.PutUint32(message[8:12], sequence)
 	copy(message[12:28], session[:])
-	return message
+	_, err := writer.Write(message[:])
+	return err
 }
 
 type ackqMessage struct {
@@ -103,11 +111,13 @@ type ackqMessage struct {
 	Session  sessionID
 }
 
-func parseACKQ(message []byte) (ackqMessage, error) {
-	if len(message) != ackqMessageLength {
-		return ackqMessage{}, E.New("invalid ACKQ length ", len(message))
+func readACKQ(reader io.Reader) (ackqMessage, error) {
+	var message [ackqMessageLength]byte
+	_, err := io.ReadFull(reader, message[:])
+	if err != nil {
+		return ackqMessage{}, err
 	}
-	if !bytes.HasPrefix(message, magicACKQ[:]) {
+	if !bytes.HasPrefix(message[:], magicACKQ[:]) {
 		return ackqMessage{}, E.New("invalid ACKQ magic ", string(message[0:4]))
 	}
 	reply := ackqMessage{
@@ -119,11 +129,11 @@ func parseACKQ(message []byte) (ackqMessage, error) {
 	return reply, nil
 }
 
-// encodeJJYY writes the channel announcement of one L3VPN connection.
+// writeJJYY writes the channel announcement of one L3VPN connection.
 // The 60-byte body travels inside a TLS application data record header that the
 // gateway never decrypts, and an 11-byte tail follows outside of it.
-func encodeJJYY(messageType uint32, session sessionID, address uint32) []byte {
-	message := make([]byte, 5+jjyyBodyLength+jjyyTailLength)
+func writeJJYY(writer io.Writer, messageType uint32, session sessionID, address uint32) error {
+	var message [5 + jjyyBodyLength + jjyyTailLength]byte
 	message[0] = 0x17 // application data
 	message[1] = 0x03
 	message[2] = 0x01 // TLS 1.0
@@ -134,7 +144,8 @@ func encodeJJYY(messageType uint32, session sessionID, address uint32) []byte {
 	copy(body[43:59], session[:])
 	tail := message[5+jjyyBodyLength:]
 	binary.LittleEndian.PutUint32(tail[7:11], address)
-	return message
+	_, err := writer.Write(message[:])
+	return err
 }
 
 type aabbMessage struct {
@@ -147,11 +158,13 @@ type aabbMessage struct {
 	Compression  uint32
 }
 
-func parseAABB(message []byte) (aabbMessage, error) {
-	if len(message) != aabbMessageLength {
-		return aabbMessage{}, E.New("invalid AABB length ", len(message))
+func readAABB(reader io.Reader) (aabbMessage, error) {
+	var message [aabbMessageLength]byte
+	_, err := io.ReadFull(reader, message[:])
+	if err != nil {
+		return aabbMessage{}, err
 	}
-	if !bytes.HasPrefix(message, magicAABB[:]) {
+	if !bytes.HasPrefix(message[:], magicAABB[:]) {
 		return aabbMessage{}, E.New("invalid AABB magic ", string(message[0:4]))
 	}
 	reply := aabbMessage{
@@ -173,13 +186,22 @@ func encodeIPCPHeader(header []byte, payloadLength int) {
 	binary.LittleEndian.PutUint32(header[8:12], 0)
 }
 
-func parseIPCPHeader(header []byte) (payloadLength int, err error) {
-	if !bytes.HasPrefix(header, magicIPCP[:]) {
+func readIPCPHeader(reader io.Reader) (payloadLength int, err error) {
+	var header [ipcpHeaderLength]byte
+	_, err = io.ReadFull(reader, header[:])
+	if err != nil {
+		return 0, err
+	}
+	if !bytes.HasPrefix(header[:], magicIPCP[:]) {
 		return 0, E.New("invalid IPCP magic ", hex.EncodeToString(header[0:4]))
 	}
 	frameLength := binary.LittleEndian.Uint32(header[4:8])
 	if frameLength < ipcpHeaderLength {
 		return 0, E.New("invalid IPCP frame length ", frameLength)
 	}
-	return int(frameLength) - ipcpHeaderLength, nil
+	payloadLength = int(frameLength) - ipcpHeaderLength
+	if payloadLength > maximumIPCPPayloadLength {
+		return 0, E.New("oversized IPCP frame of ", payloadLength, " bytes")
+	}
+	return payloadLength, nil
 }

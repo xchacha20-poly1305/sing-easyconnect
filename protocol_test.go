@@ -1,7 +1,9 @@
 package easyconnect
 
 import (
+	"bytes"
 	"encoding/binary"
+	"io"
 	"net/netip"
 	"testing"
 
@@ -15,17 +17,18 @@ func mustSessionID(t *testing.T, text string) sessionID {
 	return session
 }
 
-func TestEncodeTIMQ(t *testing.T) {
+func TestWriteTIMQ(t *testing.T) {
 	t.Parallel()
 	session := mustSessionID(t, "0123456789abcdef")
-	message := encodeTIMQ(timqTypeHandshake, 0x11223344, session)
+	var buffer bytes.Buffer
+	require.NoError(t, writeTIMQ(&buffer, timqTypeHandshake, 0x11223344, session))
 
 	expected := make([]byte, timqMessageLength)
 	copy(expected, magicTIMQ[:])
 	binary.BigEndian.PutUint32(expected[4:8], timqTypeHandshake)
 	binary.BigEndian.PutUint32(expected[8:12], 0x11223344)
 	copy(expected[12:28], session[:])
-	require.Equal(t, expected, message)
+	require.Equal(t, expected, buffer.Bytes())
 }
 
 func TestParseACKQ(t *testing.T) {
@@ -40,7 +43,7 @@ func TestParseACKQ(t *testing.T) {
 		binary.BigEndian.PutUint32(message[12:16], 7)
 		copy(message[16:32], "0123456789abcdef")
 
-		reply, err := parseACKQ(message)
+		reply, err := readACKQ(bytes.NewReader(message))
 		require.NoError(t, err)
 		require.Equal(t, ackqMessage{
 			Type:     ackqTypeHeartbeatReply,
@@ -54,22 +57,23 @@ func TestParseACKQ(t *testing.T) {
 		t.Parallel()
 		message := make([]byte, ackqMessageLength)
 		copy(message, "XXXX")
-		_, err := parseACKQ(message)
+		_, err := readACKQ(bytes.NewReader(message))
 		require.ErrorContains(t, err, "invalid ACKQ magic")
 	})
 
-	t.Run("wrong length", func(t *testing.T) {
+	t.Run("truncated", func(t *testing.T) {
 		t.Parallel()
-		_, err := parseACKQ(nil)
-		require.ErrorContains(t, err, "invalid ACKQ length")
+		_, err := readACKQ(bytes.NewReader(make([]byte, ackqMessageLength-1)))
+		require.ErrorIs(t, err, io.ErrUnexpectedEOF)
 	})
 }
 
-func TestEncodeJJYY(t *testing.T) {
+func TestWriteJJYY(t *testing.T) {
 	t.Parallel()
 	session := mustSessionID(t, "0123456789abcdef")
 	address := netip.MustParseAddr("10.1.183.174")
-	message := encodeJJYY(jjyyTypeUpload, session, channelAddress(address))
+	var buffer bytes.Buffer
+	require.NoError(t, writeJJYY(&buffer, jjyyTypeUpload, session, channelAddress(address)))
 
 	expected := make([]byte, 5+jjyyBodyLength+jjyyTailLength)
 	expected[0] = 0x17
@@ -80,7 +84,7 @@ func TestEncodeJJYY(t *testing.T) {
 	binary.LittleEndian.PutUint32(expected[12:16], jjyyTypeUpload)
 	copy(expected[48:64], session[:])
 	binary.LittleEndian.PutUint32(expected[5+jjyyBodyLength+7:], channelAddress(address))
-	require.Equal(t, expected, message)
+	require.Equal(t, expected, buffer.Bytes())
 }
 
 func TestParseAABB(t *testing.T) {
@@ -97,7 +101,7 @@ func TestParseAABB(t *testing.T) {
 		binary.LittleEndian.PutUint32(message[20:24], 0)
 		binary.LittleEndian.PutUint32(message[24:28], 3)
 
-		reply, err := parseAABB(message)
+		reply, err := readAABB(bytes.NewReader(message))
 		require.NoError(t, err)
 		require.Equal(t, aabbMessage{
 			Type:         aabbTypeCommand,
@@ -114,7 +118,7 @@ func TestParseAABB(t *testing.T) {
 		t.Parallel()
 		message := make([]byte, aabbMessageLength)
 		copy(message, "XXXX")
-		_, err := parseAABB(message)
+		_, err := readAABB(bytes.NewReader(message))
 		require.ErrorContains(t, err, "invalid AABB magic")
 	})
 }
@@ -125,13 +129,17 @@ func TestIPCPHeader(t *testing.T) {
 	encodeIPCPHeader(header, 40)
 	require.Equal(t, "IPCP", string(header[:4]))
 
-	payloadLength, err := parseIPCPHeader(header)
+	payloadLength, err := readIPCPHeader(bytes.NewReader(header))
 	require.NoError(t, err)
 	require.Equal(t, 40, payloadLength)
 
 	binary.LittleEndian.PutUint32(header[4:8], 4)
-	_, err = parseIPCPHeader(header)
+	_, err = readIPCPHeader(bytes.NewReader(header))
 	require.ErrorContains(t, err, "invalid IPCP frame length")
+
+	binary.LittleEndian.PutUint32(header[4:8], ipcpHeaderLength+maximumIPCPPayloadLength+1)
+	_, err = readIPCPHeader(bytes.NewReader(header))
+	require.ErrorContains(t, err, "oversized IPCP frame")
 }
 
 func TestPayloadEncoding(t *testing.T) {

@@ -87,9 +87,8 @@ func (c *Client) connectTunnel(ctx context.Context, web *webSession) (*tunnelSes
 		return nil, E.Cause(err, "connect keepalive channel")
 	}
 	var commandReply aabbMessage
-	session.command, commandReply, err = dialL3Channel(
+	session.command, commandReply, err = c.dialL3Channel(
 		ctx,
-		c.options.Dialer,
 		destination,
 		web.parameters.session,
 		jjyyTypeCommand,
@@ -108,9 +107,8 @@ func (c *Client) connectTunnel(ctx context.Context, web *webSession) (*tunnelSes
 		return nil, err
 	}
 	channelAddressValue := channelAddress(assignedAddress)
-	session.upload, _, err = dialL3Channel(
+	session.upload, _, err = c.dialL3Channel(
 		ctx,
-		c.options.Dialer,
 		destination,
 		web.parameters.session,
 		jjyyTypeUpload,
@@ -119,9 +117,8 @@ func (c *Client) connectTunnel(ctx context.Context, web *webSession) (*tunnelSes
 	if err != nil {
 		return nil, E.Cause(err, "connect upload channel")
 	}
-	session.receive, _, err = dialL3Channel(
+	session.receive, _, err = c.dialL3Channel(
 		ctx,
-		c.options.Dialer,
 		destination,
 		web.parameters.session,
 		jjyyTypeReceive,

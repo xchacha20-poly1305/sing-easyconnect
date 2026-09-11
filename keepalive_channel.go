@@ -2,7 +2,6 @@ package easyconnect
 
 import (
 	"context"
-	"io"
 	"net"
 	"time"
 
@@ -24,6 +23,8 @@ type keepaliveChannel struct {
 }
 
 // keepaliveOptions are the settings of one keepalive channel.
+// timeout bounds both one TIMQ/ACKQ exchange and, in dialKeepaliveChannel, the
+// whole opening handshake: the TCP connect and the camouflage exchange included.
 type keepaliveOptions struct {
 	interval time.Duration
 	timeout  time.Duration
@@ -38,6 +39,8 @@ func dialKeepaliveChannel(
 	options keepaliveOptions,
 	channelLogger logger.ContextLogger,
 ) (*keepaliveChannel, error) {
+	ctx, cancel := context.WithTimeout(ctx, options.timeout)
+	defer cancel()
 	conn, err := dialCamouflagedConn(ctx, dialer, destination, camouflageRandomTCP, []byte(session.String()))
 	if err != nil {
 		return nil, err
@@ -85,7 +88,7 @@ func (c *keepaliveChannel) exchange(ctx context.Context, requestType uint32) err
 	if err != nil {
 		return err
 	}
-	_, err = c.conn.Write(encodeTIMQ(requestType, c.requested, c.session))
+	err = writeTIMQ(c.conn, requestType, c.requested, c.session)
 	if err != nil {
 		return E.Cause(err, "write TIMQ type ", requestType)
 	}
@@ -93,15 +96,10 @@ func (c *keepaliveChannel) exchange(ctx context.Context, requestType uint32) err
 	if err != nil {
 		return err
 	}
-	message := make([]byte, ackqMessageLength)
 	for {
-		_, err = io.ReadFull(c.conn, message)
+		reply, err := readACKQ(c.conn)
 		if err != nil {
 			return E.Cause(err, "read ACKQ for TIMQ type ", requestType)
-		}
-		reply, parseErr := parseACKQ(message)
-		if parseErr != nil {
-			return parseErr
 		}
 		if reply.Session != c.session {
 			return E.Extend(ErrSessionRejected, "ACKQ session mismatch")

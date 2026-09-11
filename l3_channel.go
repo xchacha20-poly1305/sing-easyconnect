@@ -1,7 +1,6 @@
 package easyconnect
 
 import (
-	"bufio"
 	"context"
 	"encoding/binary"
 	"io"
@@ -11,20 +10,18 @@ import (
 	"github.com/sagernet/sing/common/buf"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
-	N "github.com/sagernet/sing/common/network"
 )
 
-const maximumFrameLength = 65535
-
-func dialL3Channel(
+func (c *Client) dialL3Channel(
 	ctx context.Context,
-	dialer N.Dialer,
 	destination M.Socksaddr,
 	session sessionID,
 	channelType uint32,
 	address uint32,
 ) (net.Conn, aabbMessage, error) {
-	conn, err := dialCamouflagedConn(ctx, dialer, destination, camouflageRandomL3VPN, camouflageL3SessionPrefix)
+	ctx, cancel := context.WithTimeout(ctx, c.options.KeepAliveTimeout)
+	defer cancel()
+	conn, err := dialCamouflagedConn(ctx, c.options.Dialer, destination, camouflageRandomL3VPN, camouflageL3SessionPrefix)
 	if err != nil {
 		return nil, aabbMessage{}, err
 	}
@@ -43,18 +40,13 @@ func announceL3Channel(ctx context.Context, conn net.Conn, session sessionID, ch
 		})
 		defer stopHandshakeCancel()
 	}
-	_, err := conn.Write(encodeJJYY(channelType, session, address))
+	err := writeJJYY(conn, channelType, session, address)
 	if err != nil {
 		return aabbMessage{}, E.Cause(err, "write JJYY type ", channelType)
 	}
-	message := make([]byte, aabbMessageLength)
-	_, err = io.ReadFull(conn, message)
+	reply, err := readAABB(conn)
 	if err != nil {
 		return aabbMessage{}, E.Cause(err, "read AABB type ", channelType)
-	}
-	reply, err := parseAABB(message)
-	if err != nil {
-		return aabbMessage{}, err
 	}
 	expectedType, err := expectedAABBType(channelType)
 	if err != nil {
@@ -87,18 +79,10 @@ func channelAddress(address netip.Addr) uint32 {
 	return binary.BigEndian.Uint32(octets[:])
 }
 
-func readDataPacket(reader *bufio.Reader, encoding payloadEncoding) (*buf.Buffer, error) {
-	var header [ipcpHeaderLength]byte
-	_, err := io.ReadFull(reader, header[:])
+func readDataPacket(reader io.Reader, encoding payloadEncoding) (*buf.Buffer, error) {
+	payloadLength, err := readIPCPHeader(reader)
 	if err != nil {
 		return nil, err
-	}
-	payloadLength, err := parseIPCPHeader(header[:])
-	if err != nil {
-		return nil, err
-	}
-	if payloadLength > maximumFrameLength {
-		return nil, E.New("oversized IPCP frame of ", payloadLength, " bytes")
 	}
 	packetBuffer := newPacketBuffer(payloadLength)
 	_, err = packetBuffer.ReadFullFrom(reader, payloadLength)
