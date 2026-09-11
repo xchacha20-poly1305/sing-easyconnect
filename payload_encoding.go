@@ -43,7 +43,5 @@ func (e payloadEncoding) apply(payload []byte) {
 	if !e.obfuscated {
 		return
 	}
-	for i := range payload {
-		payload[i] ^= payloadObfuscationKey
-	}
+	xorKey(payload, payloadObfuscationKey)
 }

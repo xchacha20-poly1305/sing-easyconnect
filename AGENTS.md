@@ -46,4 +46,12 @@ The library follows a layered design that mirrors the wire protocol:
 
 - IPv4 only — the protocol has no IPv6 path on any layer.
 - The camouflage handshake uses compiled-in byte sequences (in `camouflage/` binary files), not a real TLS stack.
+- The payload XOR has two implementations selected by build tag
+  (payload_encoding_xor.go / payload_encoding_xor_simd.go). Building with
+  `GOEXPERIMENT=simd` on Go 1.27+ picks the vectorized one on amd64 and arm64,
+  worth roughly 10x on AVX2 and 6x at 128-bit vector width. Every other
+  architecture keeps the scalar loop even under that experiment, because the
+  simd package emulates vectors in pure Go there and the emulation is four
+  times slower than the loop. The default build needs no new toolchain and
+  compiles to the same code as before the split.
 - Depends on `github.com/sagernet/sing` for buffer management, exception wrapping, and network abstractions.
