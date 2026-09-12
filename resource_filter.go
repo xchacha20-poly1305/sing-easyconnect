@@ -30,9 +30,8 @@ func newResourceFilter(resources []Resource, alwaysAllowed []netip.Addr) *resour
 			}
 		}
 	}
-	wholeRange := wholePortRange.Value()
 	for _, address := range alwaysAllowed {
-		filter.add(netip.PrefixFrom(address, address.BitLen()), wholeRange)
+		filter.add(netip.PrefixFrom(address, address.BitLen()), wholePortRange)
 	}
 	return filter
 }

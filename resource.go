@@ -9,7 +9,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"unique"
 
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/ranges"
@@ -39,7 +38,7 @@ func (p PortRange) Contains(port uint16) bool {
 	return port >= p.Start && port <= p.End
 }
 
-var wholePortRange = unique.Make(PortRange(ranges.New(uint16(1), math.MaxUint16)))
+var wholePortRange = PortRange(ranges.New(uint16(1), math.MaxUint16))
 
 func (r Resource) Prefixes() []netip.Prefix {
 	return common.FlatMap(r.Entries, func(it ResourceEntry) []netip.Prefix {
@@ -88,9 +87,8 @@ func parseResourceList(document *xmlElement) []Resource {
 }
 
 func parsePortRange(ports []string, index int) PortRange {
-	wholeRange := wholePortRange.Value()
 	if index >= len(ports) {
-		return wholeRange
+		return wholePortRange
 	}
 	start, end, found := strings.Cut(strings.TrimSpace(ports[index]), "~")
 	if !found {
@@ -99,7 +97,7 @@ func parsePortRange(ports []string, index int) PortRange {
 	startPort, startErr := strconv.ParseUint(strings.TrimSpace(start), 10, 16)
 	endPort, endErr := strconv.ParseUint(strings.TrimSpace(end), 10, 16)
 	if startErr != nil || endErr != nil || startPort == 0 || endPort < startPort {
-		return wholeRange
+		return wholePortRange
 	}
 	return PortRange(ranges.New(uint16(startPort), uint16(endPort)))
 }
@@ -314,7 +312,7 @@ func applyDNSHosts(resources []Resource, records []dnsHostRecord) []Resource {
 				Entries: []ResourceEntry{{
 					Domain:   record.domain,
 					Prefixes: []netip.Prefix{prefix},
-					Ports:    wholePortRange.Value(),
+					Ports:    wholePortRange,
 				}},
 			})
 			byID[record.resourceID] = len(resources) - 1
@@ -335,7 +333,7 @@ func applyDNSHosts(resources []Resource, records []dnsHostRecord) []Resource {
 			entries = append(entries, ResourceEntry{
 				Domain:   record.domain,
 				Prefixes: []netip.Prefix{prefix},
-				Ports:    wholePortRange.Value(),
+				Ports:    wholePortRange,
 			})
 		}
 		resources[index].Entries = entries

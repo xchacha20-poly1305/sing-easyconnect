@@ -138,8 +138,8 @@ func TestDataChannelKeepAliveFallsBackToTheHostRecords(t *testing.T) {
 func TestDataChannelKeepAliveFallsBackToASingleAddressResource(t *testing.T) {
 	t.Parallel()
 	resources := []Resource{{Entries: []ResourceEntry{
-		{Prefixes: []netip.Prefix{netip.MustParsePrefix("10.8.0.0/16")}, Ports: wholePortRange.Value()},
-		{Prefixes: []netip.Prefix{netip.PrefixFrom(testProbeDestination, testProbeDestination.BitLen())}, Ports: wholePortRange.Value()},
+		{Prefixes: []netip.Prefix{netip.MustParsePrefix("10.8.0.0/16")}, Ports: wholePortRange},
+		{Prefixes: []netip.Prefix{netip.PrefixFrom(testProbeDestination, testProbeDestination.BitLen())}, Ports: wholePortRange},
 	}}}
 	keepalive, err := newDataChannelKeepalive(
 		t.Context(),
