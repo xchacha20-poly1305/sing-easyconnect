@@ -12,7 +12,7 @@ import (
 
 func mustSessionID(t *testing.T, text string) sessionID {
 	t.Helper()
-	session, err := parseSessionID(text)
+	session, err := parseSessionID([]byte(text))
 	require.NoError(t, err)
 	return session
 }
@@ -73,7 +73,7 @@ func TestWriteJJYY(t *testing.T) {
 	session := mustSessionID(t, "0123456789abcdef")
 	address := netip.MustParseAddr("10.1.183.174")
 	var buffer bytes.Buffer
-	require.NoError(t, writeJJYY(&buffer, jjyyTypeUpload, session, channelAddress(address)))
+	require.NoError(t, writeJJYY(&buffer, jjyyTypeUpload, session, address))
 
 	expected := make([]byte, 5+jjyyBodyLength+jjyyTailLength)
 	expected[0] = 0x17
@@ -83,7 +83,7 @@ func TestWriteJJYY(t *testing.T) {
 	copy(expected[8:12], magicJJYY[:])
 	binary.LittleEndian.PutUint32(expected[12:16], jjyyTypeUpload)
 	copy(expected[48:64], session[:])
-	binary.LittleEndian.PutUint32(expected[5+jjyyBodyLength+7:], channelAddress(address))
+	copy(expected[5+jjyyBodyLength+7:], []byte{174, 183, 1, 10})
 	require.Equal(t, expected, buffer.Bytes())
 }
 
@@ -105,13 +105,12 @@ func TestParseAABB(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, aabbMessage{
 			Type:         aabbTypeCommand,
-			Address:      [4]byte{10, 1, 183, 174},
+			Address:      netip.MustParseAddr("10.1.183.174"),
 			Encryption:   1,
-			LocalAddress: [4]byte{10, 1, 253, 6},
+			LocalAddress: netip.MustParseAddr("10.1.253.6"),
 			UDPPort:      0,
 			Compression:  3,
 		}, reply)
-		require.Equal(t, netip.MustParseAddr("10.1.183.174"), netip.AddrFrom4(reply.Address))
 	})
 
 	t.Run("wrong magic", func(t *testing.T) {
@@ -195,7 +194,7 @@ func TestParseSessionID(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
-			session, err := parseSessionID(testCase.input)
+			session, err := parseSessionID([]byte(testCase.input))
 			if testCase.wantErr != "" {
 				require.ErrorContains(t, err, testCase.wantErr)
 				return

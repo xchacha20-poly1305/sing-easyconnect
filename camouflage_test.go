@@ -12,7 +12,7 @@ import (
 func TestCamouflageClientHello(t *testing.T) {
 	t.Parallel()
 	session := mustSessionID(t, "0123456789abcdef")
-	helloBuffer := camouflageClientHello(camouflageRandomTCP, camouflageSessionID([]byte(session.String())))
+	helloBuffer := camouflageClientHello(camouflageRandomTCP, camouflageSessionID(camouflageSessionPrefix(session)))
 	defer helloBuffer.Release()
 	hello := helloBuffer.Bytes()
 
@@ -33,7 +33,8 @@ func TestCamouflageClientHello(t *testing.T) {
 
 func TestCamouflageL3SessionID(t *testing.T) {
 	t.Parallel()
-	require.Equal(t, camouflageServerAck[44:76], camouflageSessionID(camouflageL3SessionPrefix))
+	l3SessionIdentifier := camouflageSessionID(camouflageL3SessionPrefix)
+	require.Equal(t, camouflageServerAck[44:76], l3SessionIdentifier[:])
 }
 
 func TestReadCamouflageServerAck(t *testing.T) {

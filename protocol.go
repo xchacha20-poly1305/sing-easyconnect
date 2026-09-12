@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"io"
+	"net/netip"
 
 	E "github.com/sagernet/sing/common/exceptions"
 )
@@ -58,6 +59,10 @@ const (
 	jjyyTypeReceive uint32 = 6
 )
 
+// jjyyNoAddress fills the JJYY address tail before the gateway has assigned
+// anything, which is the case on the command channel that asks for it.
+var jjyyNoAddress = netip.AddrFrom4([4]byte{0xff, 0xff, 0xff, 0xff})
+
 // AABB reply types, indexed differently from the JJYY type that requested them.
 const (
 	aabbTypeCommand uint32 = 0
@@ -75,12 +80,16 @@ var (
 
 type sessionID [SessionIDLength]byte
 
-func parseSessionID(text string) (sessionID, error) {
+// parseSessionID takes the ASCII hex session as it appears on the wire and in
+// the sslctx blob; it stays in that form, because every message carries the
+// text and not the bytes it spells.
+func parseSessionID(text []byte) (sessionID, error) {
 	var id sessionID
 	if len(text) != SessionIDLength {
 		return id, E.New("invalid session id length ", len(text))
 	}
-	_, err := hex.DecodeString(text)
+	var decoded [SessionIDLength / 2]byte
+	_, err := hex.Decode(decoded[:], text)
 	if err != nil {
 		return id, E.Cause(err, "invalid session id")
 	}
@@ -132,7 +141,10 @@ func readACKQ(reader io.Reader) (ackqMessage, error) {
 // writeJJYY writes the channel announcement of one L3VPN connection.
 // The 60-byte body travels inside a TLS application data record header that the
 // gateway never decrypts, and an 11-byte tail follows outside of it.
-func writeJJYY(writer io.Writer, messageType uint32, session sessionID, address uint32) error {
+func writeJJYY(writer io.Writer, messageType uint32, session sessionID, address netip.Addr) error {
+	if !address.Is4() {
+		return E.New("non-IPv4 channel address ", address)
+	}
 	var message [5 + jjyyBodyLength + jjyyTailLength]byte
 	message[0] = 0x17 // application data
 	message[1] = 0x03
@@ -143,7 +155,10 @@ func writeJJYY(writer io.Writer, messageType uint32, session sessionID, address 
 	binary.LittleEndian.PutUint32(body[7:11], messageType)
 	copy(body[43:59], session[:])
 	tail := message[5+jjyyBodyLength:]
-	binary.LittleEndian.PutUint32(tail[7:11], address)
+	// The address travels with its octets reversed: the client holds it as a
+	// host-order integer and writes that little-endian.
+	octets := address.As4()
+	binary.LittleEndian.PutUint32(tail[7:11], binary.BigEndian.Uint32(octets[:]))
 	_, err := writer.Write(message[:])
 	return err
 }
@@ -151,9 +166,9 @@ func writeJJYY(writer io.Writer, messageType uint32, session sessionID, address 
 type aabbMessage struct {
 	Type uint32
 	// Command reply fields, only meaningful on the command channel.
-	Address      [4]byte
+	Address      netip.Addr
 	Encryption   uint32
-	LocalAddress [4]byte
+	LocalAddress netip.Addr
 	UDPPort      uint32
 	Compression  uint32
 }
@@ -168,13 +183,13 @@ func readAABB(reader io.Reader) (aabbMessage, error) {
 		return aabbMessage{}, E.New("invalid AABB magic ", string(message[0:4]))
 	}
 	reply := aabbMessage{
-		Type:        binary.LittleEndian.Uint32(message[4:8]),
-		Address:     [4]byte(message[8:12]),
-		Encryption:  binary.LittleEndian.Uint32(message[12:16]),
-		UDPPort:     binary.LittleEndian.Uint32(message[20:24]),
-		Compression: binary.LittleEndian.Uint32(message[24:28]),
+		Type:         binary.LittleEndian.Uint32(message[4:8]),
+		Address:      netip.AddrFrom4([4]byte(message[8:12])),
+		Encryption:   binary.LittleEndian.Uint32(message[12:16]),
+		LocalAddress: netip.AddrFrom4([4]byte(message[16:20])),
+		UDPPort:      binary.LittleEndian.Uint32(message[20:24]),
+		Compression:  binary.LittleEndian.Uint32(message[24:28]),
 	}
-	copy(reply.LocalAddress[:], message[16:20])
 	return reply, nil
 }
 

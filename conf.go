@@ -37,7 +37,7 @@ func parseTunnelParameters(document *xmlElement) (tunnelParameters, error) {
 	if len(sslContext) != sslContextLength {
 		return parameters, E.New("invalid sslctx length ", len(sslContext))
 	}
-	parameters.session, err = parseSessionID(string(sslContext[sslContextSessionOffset : sslContextSessionOffset+SessionIDLength]))
+	parameters.session, err = parseSessionID(sslContext[sslContextSessionOffset : sslContextSessionOffset+SessionIDLength])
 	if err != nil {
 		return parameters, err
 	}

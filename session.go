@@ -6,7 +6,6 @@ import (
 	"context"
 	"io"
 	"net"
-	"net/netip"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -59,7 +58,7 @@ func (c *Client) connectTunnel(ctx context.Context, web *webSession) (*tunnelSes
 	session := &tunnelSession{
 		client:   c,
 		done:     make(chan error, 1),
-		outgoing: newDataPacketQueue[*buf.Buffer](int(c.options.QueueLength)),
+		outgoing: newDataPacketQueue[*buf.Buffer](c.queueLength),
 	}
 	keepaliveStart := c.created
 	if !c.options.KeepAliveSequenceDisguiseDisabled {
@@ -92,12 +91,12 @@ func (c *Client) connectTunnel(ctx context.Context, web *webSession) (*tunnelSes
 		destination,
 		web.parameters.session,
 		jjyyTypeCommand,
-		^uint32(0),
+		jjyyNoAddress,
 	)
 	if err != nil {
 		return nil, E.Cause(err, "connect command channel")
 	}
-	assignedAddress := netip.AddrFrom4(commandReply.Address)
+	assignedAddress := commandReply.Address
 	if !assignedAddress.IsValid() || assignedAddress.IsUnspecified() {
 		err = E.Extend(ErrSessionRejected, "gateway assigned no address")
 		return nil, err
@@ -106,13 +105,12 @@ func (c *Client) connectTunnel(ctx context.Context, web *webSession) (*tunnelSes
 	if err != nil {
 		return nil, err
 	}
-	channelAddressValue := channelAddress(assignedAddress)
 	session.upload, _, err = c.dialL3Channel(
 		ctx,
 		destination,
 		web.parameters.session,
 		jjyyTypeUpload,
-		channelAddressValue,
+		assignedAddress,
 	)
 	if err != nil {
 		return nil, E.Cause(err, "connect upload channel")
@@ -122,7 +120,7 @@ func (c *Client) connectTunnel(ctx context.Context, web *webSession) (*tunnelSes
 		destination,
 		web.parameters.session,
 		jjyyTypeReceive,
-		channelAddressValue,
+		assignedAddress,
 	)
 	if err != nil {
 		return nil, E.Cause(err, "connect receive channel")
@@ -137,7 +135,7 @@ func (c *Client) connectTunnel(ctx context.Context, web *webSession) (*tunnelSes
 		return nil, err
 	}
 	c.options.Logger.DebugContext(ctx, "tunnel address ", assignedAddress,
-		", gateway address ", netip.AddrFrom4(commandReply.LocalAddress),
+		", gateway address ", commandReply.LocalAddress,
 		", encoding ", commandReply.Encryption, "/", commandReply.Compression,
 		", gateway UDP port ", commandReply.UDPPort)
 	return session, nil

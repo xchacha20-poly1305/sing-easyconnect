@@ -2,7 +2,6 @@ package easyconnect
 
 import (
 	"context"
-	"encoding/binary"
 	"io"
 	"net"
 	"net/netip"
@@ -17,7 +16,7 @@ func (c *Client) dialL3Channel(
 	destination M.Socksaddr,
 	session sessionID,
 	channelType uint32,
-	address uint32,
+	address netip.Addr,
 ) (net.Conn, aabbMessage, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.options.KeepAliveTimeout)
 	defer cancel()
@@ -33,7 +32,7 @@ func (c *Client) dialL3Channel(
 	return conn, reply, nil
 }
 
-func announceL3Channel(ctx context.Context, conn net.Conn, session sessionID, channelType uint32, address uint32) (aabbMessage, error) {
+func announceL3Channel(ctx context.Context, conn net.Conn, session sessionID, channelType uint32, address netip.Addr) (aabbMessage, error) {
 	if ctx.Done() != nil {
 		stopHandshakeCancel := context.AfterFunc(ctx, func() {
 			conn.Close()
@@ -69,14 +68,6 @@ func expectedAABBType(channelType uint32) (uint32, error) {
 	default:
 		return 0, E.New("unknown channel type ", channelType)
 	}
-}
-
-func channelAddress(address netip.Addr) uint32 {
-	if !address.Is4() {
-		return 0
-	}
-	octets := address.As4()
-	return binary.BigEndian.Uint32(octets[:])
 }
 
 func readDataPacket(reader io.Reader, encoding payloadEncoding) (*buf.Buffer, error) {

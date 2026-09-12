@@ -144,10 +144,8 @@ func addressRangePrefixes(start netip.Addr, end netip.Addr) []netip.Prefix {
 	if !start.Is4() || !end.Is4() {
 		return nil
 	}
-	startOctets := start.As4()
-	endOctets := end.As4()
-	first := binary.BigEndian.Uint32(startOctets[:])
-	last := binary.BigEndian.Uint32(endOctets[:])
+	first := addressValue(start)
+	last := addressValue(end)
 	if first > last {
 		return nil
 	}
@@ -165,7 +163,7 @@ func addressRangePrefixes(start netip.Addr, end netip.Addr) []netip.Prefix {
 			size--
 		}
 		bitLength := 32 - min(alignment, size)
-		prefixes = append(prefixes, netip.PrefixFrom(uint32Address(first), bitLength))
+		prefixes = append(prefixes, netip.PrefixFrom(valueAddress(first), bitLength))
 		blockSize := uint32(1) << (32 - bitLength)
 		if first+blockSize-1 >= last {
 			return prefixes
@@ -174,10 +172,15 @@ func addressRangePrefixes(start netip.Addr, end netip.Addr) []netip.Prefix {
 	}
 }
 
-func uint32Address(value uint32) netip.Addr {
-	var address [4]byte
-	binary.BigEndian.PutUint32(address[:], value)
-	return netip.AddrFrom4(address)
+func addressValue(address netip.Addr) uint32 {
+	octets := address.As4()
+	return binary.BigEndian.Uint32(octets[:])
+}
+
+func valueAddress(value uint32) netip.Addr {
+	var octets [4]byte
+	binary.BigEndian.PutUint32(octets[:], value)
+	return netip.AddrFrom4(octets)
 }
 
 type dnsHostRecord struct {

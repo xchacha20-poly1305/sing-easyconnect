@@ -1,7 +1,6 @@
 package easyconnect
 
 import (
-	"bytes"
 	"context"
 	_ "embed"
 	"encoding/binary"
@@ -47,9 +46,16 @@ var (
 	camouflageSessionTemplate []byte
 )
 
-// camouflageL3SessionPrefix replaces the session prefix on L3VPN connections,
-// where the client does not send the gateway session id.
-var camouflageL3SessionPrefix = camouflageSessionTemplate[:camouflageSessionPrefixLength]
+// camouflageSessionPrefix is the first half of the 32-byte camouflage session
+// id: the ASCII hex gateway session on the TCP channel, and template bytes on
+// the L3VPN connections, where the client does not send the gateway session id.
+type camouflageSessionPrefix [camouflageSessionPrefixLength]byte
+
+// camouflageSessionIdentifier is the session id a client hello carries: a
+// prefix, the '@' separator and the tail shared by every session.
+type camouflageSessionIdentifier [camouflageSessionIDLength]byte
+
+var camouflageL3SessionPrefix = camouflageSessionPrefix(camouflageSessionTemplate[:camouflageSessionPrefixLength])
 
 // Last byte of the client random, the only field that distinguishes the TCP
 // module connection from the L3VPN connections.
@@ -81,15 +87,15 @@ const (
 	camouflageClientHelloLength = 5 + camouflageHandshakeLength
 )
 
-func camouflageSessionID(prefix []byte) []byte {
-	sessionIdentifier := bytes.Clone(camouflageSessionTemplate)
-	copy(sessionIdentifier[:camouflageSessionPrefixLength], prefix)
+func camouflageSessionID(prefix camouflageSessionPrefix) camouflageSessionIdentifier {
+	sessionIdentifier := camouflageSessionIdentifier(camouflageSessionTemplate)
+	copy(sessionIdentifier[:camouflageSessionPrefixLength], prefix[:])
 	return sessionIdentifier
 }
 
 // camouflageClientHello builds the 82-byte hello: TLS 1.0, one cipher suite,
 // no compression and no extensions. The caller owns the returned buffer.
-func camouflageClientHello(randomSuffix byte, sessionIdentifier []byte) *buf.Buffer {
+func camouflageClientHello(randomSuffix byte, sessionIdentifier camouflageSessionIdentifier) *buf.Buffer {
 	buffer := buf.NewSize(camouflageClientHelloLength)
 	common.Must(common.Error(buffer.Write([]byte{0x16, 0x03, 0x01}))) // handshake record, TLS 1.0
 	binary.BigEndian.PutUint16(buffer.Extend(2), camouflageHandshakeLength)
@@ -100,14 +106,14 @@ func camouflageClientHello(randomSuffix byte, sessionIdentifier []byte) *buf.Buf
 		common.Error(buffer.Write(camouflageRandomPrefix)),
 		buffer.WriteByte(randomSuffix),
 		buffer.WriteByte(camouflageSessionIDLength),
-		common.Error(buffer.Write(sessionIdentifier)),
+		common.Error(buffer.Write(sessionIdentifier[:])),
 		common.Error(buffer.Write([]byte{0x00, 0x02, 0x00, 0x39})), // TLS_DHE_RSA_WITH_AES_256_CBC_SHA
 		common.Error(buffer.Write([]byte{0x01, 0x00})),             // no compression
 	)
 	return buffer
 }
 
-func dialCamouflagedConn(ctx context.Context, dialer N.Dialer, destination M.Socksaddr, randomSuffix byte, sessionPrefix []byte) (net.Conn, error) {
+func dialCamouflagedConn(ctx context.Context, dialer N.Dialer, destination M.Socksaddr, randomSuffix byte, sessionPrefix camouflageSessionPrefix) (net.Conn, error) {
 	conn, err := dialer.DialContext(ctx, N.NetworkTCP, destination)
 	if err != nil {
 		return nil, err
@@ -167,7 +173,7 @@ func readTLSRecord(reader io.Reader, recordType byte) ([]byte, error) {
 	return payload, nil
 }
 
-func camouflageHandshake(conn net.Conn, randomSuffix byte, sessionPrefix []byte) error {
+func camouflageHandshake(conn net.Conn, randomSuffix byte, sessionPrefix camouflageSessionPrefix) error {
 	clientHello := camouflageClientHello(randomSuffix, camouflageSessionID(sessionPrefix))
 	defer clientHello.Release()
 	_, err := clientHello.WriteTo(conn)

@@ -41,7 +41,7 @@ func dialKeepaliveChannel(
 ) (*keepaliveChannel, error) {
 	ctx, cancel := context.WithTimeout(ctx, options.timeout)
 	defer cancel()
-	conn, err := dialCamouflagedConn(ctx, dialer, destination, camouflageRandomTCP, []byte(session.String()))
+	conn, err := dialCamouflagedConn(ctx, dialer, destination, camouflageRandomTCP, camouflageSessionPrefix(session))
 	if err != nil {
 		return nil, err
 	}

@@ -30,7 +30,10 @@ type Client struct {
 	options ClientOptions
 	// created stands in for the launch of the reference client, which is one
 	// VPN client per process.
-	created       time.Time
+	created time.Time
+	// queueLength is options.QueueLength narrowed once, because every queue in
+	// the client and in its sessions is sized from it.
+	queueLength   int
 	serverURL     *url.URL
 	httpClient    *http.Client
 	httpTransport *http.Transport
@@ -101,6 +104,7 @@ func NewClient(options ClientOptions) (*Client, error) {
 	if uint64(options.QueueLength) > math.MaxInt {
 		return nil, E.New("packet queue length exceeds platform limit")
 	}
+	queueLength := int(options.QueueLength)
 	serverURL, err := parseServerURL(options.Server)
 	if err != nil {
 		return nil, err
@@ -112,9 +116,10 @@ func NewClient(options ClientOptions) (*Client, error) {
 	client := &Client{
 		options:                options,
 		created:                time.Now(),
+		queueLength:            queueLength,
 		serverURL:              serverURL,
 		configurationEventWake: make(chan struct{}, 1),
-		incomingDataPackets:    newDataPacketQueue[*buf.Buffer](int(options.QueueLength)),
+		incomingDataPackets:    newDataPacketQueue[*buf.Buffer](queueLength),
 		stateChanged:           make(chan struct{}),
 	}
 	client.httpClient, client.httpTransport, err = newHTTPClient(client, tlsConfig)
