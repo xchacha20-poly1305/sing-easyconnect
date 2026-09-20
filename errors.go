@@ -19,7 +19,7 @@ var (
 	ErrMaterialSourceConflict = E.New("material path and content are both set")
 	ErrInvalidTLSMaterial     = E.New("invalid easyconnect TLS material")
 	ErrReconnectTimeout       = E.New("reconnect timeout exceeded")
-	errTunnelConfiguration    = E.New("tunnel configuration callback failed")
+	errTunnelEvent            = E.New("tunnel event callback failed")
 )
 
 type TerminalError struct {

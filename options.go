@@ -87,10 +87,15 @@ type ClientOptions struct {
 	// a datagram as a violation and drops the tunnel after a few of them.
 	ResourceFilterDisabled bool
 
-	TLSConfig             ClientTLSOptions
-	Dialer                N.Dialer
-	Logger                logger.ContextLogger
-	OnTunnelConfiguration func(event TunnelConfigurationEvent) error
+	TLSConfig ClientTLSOptions
+	Dialer    N.Dialer
+	Logger    logger.ContextLogger
+
+	// OnTunnelEvent is called once per tunnel state change, from one
+	// goroutine and in order. An error from it fails the client for good:
+	// a caller that cannot program the tunnel the gateway handed out has
+	// nothing to retry.
+	OnTunnelEvent func(event TunnelEvent) error
 }
 
 func (c ClientOptions) Clone() ClientOptions {

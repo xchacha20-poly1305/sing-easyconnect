@@ -5,11 +5,12 @@ import (
 	"slices"
 )
 
-type TunnelConfigurationEventReason string
+type TunnelEventReason string
 
 const (
-	TunnelConfigurationEventInitial         TunnelConfigurationEventReason = "initial"
-	TunnelConfigurationEventReestablishment TunnelConfigurationEventReason = "reestablishment"
+	TunnelEventInitial         TunnelEventReason = "initial"
+	TunnelEventReestablishment TunnelEventReason = "reestablishment"
+	TunnelEventDisconnect      TunnelEventReason = "disconnect"
 )
 
 type TunnelConfiguration struct {
@@ -33,8 +34,14 @@ type TunnelRoute struct {
 	Prefix netip.Prefix
 }
 
-type TunnelConfigurationEvent struct {
-	Reason        TunnelConfigurationEventReason
+// TunnelEvent reports that the tunnel came up or went down, in the order the
+// two happen. A caller that programs a TUN device from Configuration has to
+// hear about the tunnel going down as well: the address the gateway assigned
+// belongs to the session that ended, and the next session may be handed a
+// different one.
+type TunnelEvent struct {
+	Reason TunnelEventReason
+	// Configuration is zero when Reason is TunnelEventDisconnect.
 	Configuration TunnelConfiguration
 }
 

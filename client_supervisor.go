@@ -15,6 +15,28 @@ const (
 	clientReconnectMaximumBackoff = 60 * time.Second
 )
 
+type reconnectState struct {
+	backoff          time.Duration
+	established      bool
+	reconnecting     bool
+	timeoutRemaining time.Duration
+}
+
+func newReconnectState() reconnectState {
+	return reconnectState{backoff: clientReconnectInitialBackoff}
+}
+
+func (s *reconnectState) tunnelLost(reconnectTimeout time.Duration) {
+	s.established = true
+	s.reconnecting = true
+	s.timeoutRemaining = reconnectTimeout
+	s.backoff = clientReconnectInitialBackoff
+}
+
+func (s *reconnectState) attemptFailed() {
+	s.backoff = min(s.backoff*2, clientReconnectMaximumBackoff)
+}
+
 type clientSession interface {
 	Start() error
 	Done() <-chan error
@@ -39,7 +61,7 @@ func isTerminalError(err error) bool {
 		ErrMaterialSourceConflict,
 		ErrInvalidTLSMaterial,
 		ErrProtocolNotSupported,
-		errTunnelConfiguration,
+		errTunnelEvent,
 	) {
 		return true
 	}
@@ -62,16 +84,23 @@ func (c *Client) runSupervisor(ctx context.Context) {
 	defer func() {
 		c.releaseWebSession(web)
 	}()
-	backoff := clientReconnectInitialBackoff
-	established := false
-	reconnecting := false
-	var reconnectTimeoutRemaining time.Duration
+	reconnect := newReconnectState()
 	for {
 		if ctx.Err() != nil || c.isClosed() {
 			return
 		}
-		if !c.waitResumed(ctx) {
-			return
+		if c.isSuspended() {
+			// Nothing keeps an authenticated session across a suspension: the
+			// gateway reclaims a session whose tunnel stopped answering, and
+			// may refuse a second login beside one it still counts as online.
+			web = c.discardWebSession(web)
+			if !c.waitResumed(ctx) {
+				return
+			}
+			// Resuming starts a run of its own. The tunnel that follows is not
+			// the continuation of one the network took away, so it is not
+			// charged to the reconnect timeout.
+			reconnect = newReconnectState()
 		}
 		if web == nil {
 			authenticated, err := c.authenticate(ctx)
@@ -84,25 +113,34 @@ func (c *Client) runSupervisor(ctx context.Context) {
 					c.setTerminalError(err)
 					return
 				}
-				c.options.Logger.DebugContext(ctx, "authentication failed; retrying in ", backoff, ": ", err)
-				if !c.waitClientReconnectBackoff(ctx, backoff, reconnecting, &reconnectTimeoutRemaining) {
+				c.options.Logger.DebugContext(ctx, "authentication failed; retrying in ", reconnect.backoff, ": ", err)
+				if !c.waitClientReconnectBackoff(ctx, &reconnect) {
 					return
 				}
-				backoff = nextClientReconnectBackoff(backoff)
+				reconnect.attemptFailed()
 				continue
 			}
 			web = authenticated
+			if c.isSuspended() {
+				// Suspended while authenticating. The session is handed back at
+				// the top of the loop rather than spent on a tunnel that would
+				// be failed as soon as it is published.
+				continue
+			}
 		}
 		published := false
 		session, err := c.connectTunnel(ctx, web)
 		if err == nil {
-			published, err = c.runSession(ctx, session, established)
+			published, err = c.runSession(ctx, session, reconnect.established)
 		}
 		if ctx.Err() != nil || c.isClosed() {
 			return
 		}
 		if errors.Is(err, ErrClientSuspended) || c.isSuspended() {
-			backoff = clientReconnectInitialBackoff
+			// A suspension takes the session with the tunnel, whether or not
+			// the client has been resumed again in the meantime.
+			web = c.discardWebSession(web)
+			reconnect = newReconnectState()
 			continue
 		}
 		if isTerminalError(err) {
@@ -112,24 +150,25 @@ func (c *Client) runSupervisor(ctx context.Context) {
 		}
 		// The gateway ties the tunnel to the authenticated session,
 		// so a failed tunnel restarts from the web endpoints with a fresh one.
-		c.releaseWebSession(web)
-		web = nil
+		web = c.discardWebSession(web)
 		if published {
 			// An established tunnel is worth re-establishing at once,
 			// bounded by the reconnect timeout rather than by the backoff.
-			established = true
-			reconnecting = true
-			reconnectTimeoutRemaining = c.options.ReconnectTimeout
-			backoff = clientReconnectInitialBackoff
+			reconnect.tunnelLost(c.options.ReconnectTimeout)
 			c.options.Logger.DebugContext(ctx, "tunnel ended; retrying immediately: ", err)
 			continue
 		}
-		c.options.Logger.DebugContext(ctx, "tunnel connection failed; retrying in ", backoff, ": ", err)
-		if !c.waitClientReconnectBackoff(ctx, backoff, reconnecting, &reconnectTimeoutRemaining) {
+		c.options.Logger.DebugContext(ctx, "tunnel connection failed; retrying in ", reconnect.backoff, ": ", err)
+		if !c.waitClientReconnectBackoff(ctx, &reconnect) {
 			return
 		}
-		backoff = nextClientReconnectBackoff(backoff)
+		reconnect.attemptFailed()
 	}
+}
+
+func (c *Client) discardWebSession(web *webSession) *webSession {
+	c.releaseWebSession(web)
+	return nil
 }
 
 func (c *Client) runSession(ctx context.Context, session *tunnelSession, reestablishment bool) (bool, error) {
@@ -141,17 +180,17 @@ func (c *Client) runSession(ctx context.Context, session *tunnelSession, reestab
 		c.clearCurrentSession(session)
 		return false, E.Errors(err, session.Close())
 	}
-	reason := TunnelConfigurationEventInitial
+	reason := TunnelEventInitial
 	if reestablishment {
-		reason = TunnelConfigurationEventReestablishment
+		reason = TunnelEventReestablishment
 	}
 	configuration := c.setTunnelConfiguration(session.TunnelConfiguration())
 	if !c.publishCurrentSession(ctx, session) {
 		c.clearCurrentSession(session)
 		return false, E.Errors(session.Close(), ErrClientClosed)
 	}
-	c.publishTunnelConfigurationEvent(reason, configuration)
-	if reason == TunnelConfigurationEventInitial {
+	c.publishTunnelEvent(reason, configuration)
+	if reason == TunnelEventInitial {
 		c.options.Logger.InfoContext(ctx, "easyconnect tunnel established")
 	} else {
 		c.options.Logger.InfoContext(ctx, "easyconnect tunnel re-established")
@@ -169,27 +208,25 @@ func (c *Client) runSession(ctx context.Context, session *tunnelSession, reestab
 	}
 	sessionErr = E.Errors(sessionErr, session.Close())
 	c.clearCurrentSession(session)
+	// The address the gateway assigned belonged to this session, and the next
+	// session may be handed a different one, so a caller that programmed a TUN
+	// device from the configuration hears that it no longer applies.
+	c.setTunnelConfiguration(TunnelConfiguration{})
+	c.publishTunnelEvent(TunnelEventDisconnect, TunnelConfiguration{})
 	if sessionErr == nil {
 		sessionErr = E.New("tunnel ended without an error")
 	}
 	return true, sessionErr
 }
 
-func (c *Client) waitClientReconnectBackoff(
-	ctx context.Context,
-	backoff time.Duration,
-	reconnecting bool,
-	reconnectTimeoutRemaining *time.Duration,
-) bool {
-	wait := backoff
-	if reconnecting {
-		if *reconnectTimeoutRemaining <= 0 {
+func (c *Client) waitClientReconnectBackoff(ctx context.Context, reconnect *reconnectState) bool {
+	wait := reconnect.backoff
+	if reconnect.reconnecting {
+		if reconnect.timeoutRemaining <= 0 {
 			c.setTerminalError(ErrReconnectTimeout)
 			return false
 		}
-		if *reconnectTimeoutRemaining < wait {
-			wait = *reconnectTimeoutRemaining
-		}
+		wait = min(wait, reconnect.timeoutRemaining)
 	}
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
@@ -197,19 +234,11 @@ func (c *Client) waitClientReconnectBackoff(
 	case <-ctx.Done():
 		return false
 	case <-timer.C:
-		if reconnecting {
-			*reconnectTimeoutRemaining -= wait
+		if reconnect.reconnecting {
+			reconnect.timeoutRemaining -= wait
 		}
 		return true
 	}
-}
-
-func nextClientReconnectBackoff(backoff time.Duration) time.Duration {
-	next := backoff * 2
-	if next > clientReconnectMaximumBackoff {
-		return clientReconnectMaximumBackoff
-	}
-	return next
 }
 
 func (c *Client) setCurrentSession(ctx context.Context, session clientSession) bool {

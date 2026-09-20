@@ -38,12 +38,12 @@ type Client struct {
 	httpClient    *http.Client
 	httpTransport *http.Transport
 
-	configurationAccess       sync.RWMutex
-	tunnelConfiguration       TunnelConfiguration
-	configurationEventAccess  sync.Mutex
-	configurationEvents       []TunnelConfigurationEvent
-	configurationEventWake    chan struct{}
-	configurationEventStopped bool
+	configurationAccess sync.RWMutex
+	tunnelConfiguration TunnelConfiguration
+	tunnelEventAccess   sync.Mutex
+	tunnelEvents        []TunnelEvent
+	tunnelEventWake     chan struct{}
+	tunnelEventStopped  bool
 
 	droppedOutgoingDataPackets atomic.Uint64
 	incomingDataPackets        *dataPacketQueue[*buf.Buffer]
@@ -114,13 +114,13 @@ func NewClient(options ClientOptions) (*Client, error) {
 		return nil, err
 	}
 	client := &Client{
-		options:                options,
-		created:                time.Now(),
-		queueLength:            queueLength,
-		serverURL:              serverURL,
-		configurationEventWake: make(chan struct{}, 1),
-		incomingDataPackets:    newDataPacketQueue[*buf.Buffer](queueLength),
-		stateChanged:           make(chan struct{}),
+		options:             options,
+		created:             time.Now(),
+		queueLength:         queueLength,
+		serverURL:           serverURL,
+		tunnelEventWake:     make(chan struct{}, 1),
+		incomingDataPackets: newDataPacketQueue[*buf.Buffer](queueLength),
+		stateChanged:        make(chan struct{}),
 	}
 	client.httpClient, client.httpTransport, err = newHTTPClient(client, tlsConfig)
 	if err != nil {
@@ -144,8 +144,8 @@ func (c *Client) Start() error {
 	c.supervisorDone = make(chan struct{})
 	c.started = true
 	c.lifecycleAccess.Unlock()
-	if c.options.OnTunnelConfiguration != nil {
-		go c.runTunnelConfigurationDispatcher()
+	if c.options.OnTunnelEvent != nil {
+		go c.runTunnelEventDispatcher()
 	}
 	go c.runSupervisor(supervisorContext)
 	return nil
@@ -309,50 +309,50 @@ func (c *Client) setTunnelConfiguration(configuration TunnelConfiguration) Tunne
 	return configuration
 }
 
-func (c *Client) publishTunnelConfigurationEvent(reason TunnelConfigurationEventReason, configuration TunnelConfiguration) {
-	if c.options.OnTunnelConfiguration == nil {
+func (c *Client) publishTunnelEvent(reason TunnelEventReason, configuration TunnelConfiguration) {
+	if c.options.OnTunnelEvent == nil {
 		return
 	}
-	c.configurationEventAccess.Lock()
-	if !c.configurationEventStopped {
-		c.configurationEvents = append(c.configurationEvents, TunnelConfigurationEvent{
+	c.tunnelEventAccess.Lock()
+	if !c.tunnelEventStopped {
+		c.tunnelEvents = append(c.tunnelEvents, TunnelEvent{
 			Reason:        reason,
 			Configuration: cloneTunnelConfiguration(configuration),
 		})
 	}
-	c.configurationEventAccess.Unlock()
+	c.tunnelEventAccess.Unlock()
 	select {
-	case c.configurationEventWake <- struct{}{}:
+	case c.tunnelEventWake <- struct{}{}:
 	default:
 	}
 }
 
-func (c *Client) runTunnelConfigurationDispatcher() {
+func (c *Client) runTunnelEventDispatcher() {
 	for {
-		c.configurationEventAccess.Lock()
-		if c.configurationEventStopped {
-			c.configurationEvents = nil
-			c.configurationEventAccess.Unlock()
+		c.tunnelEventAccess.Lock()
+		if c.tunnelEventStopped {
+			c.tunnelEvents = nil
+			c.tunnelEventAccess.Unlock()
 			return
 		}
-		if len(c.configurationEvents) == 0 {
-			c.configurationEventAccess.Unlock()
-			<-c.configurationEventWake
+		if len(c.tunnelEvents) == 0 {
+			c.tunnelEventAccess.Unlock()
+			<-c.tunnelEventWake
 			continue
 		}
-		event := c.configurationEvents[0]
-		c.configurationEvents[0] = TunnelConfigurationEvent{}
-		c.configurationEvents = c.configurationEvents[1:]
-		c.configurationEventAccess.Unlock()
-		err := c.options.OnTunnelConfiguration(event)
+		event := c.tunnelEvents[0]
+		c.tunnelEvents[0] = TunnelEvent{}
+		c.tunnelEvents = c.tunnelEvents[1:]
+		c.tunnelEventAccess.Unlock()
+		err := c.options.OnTunnelEvent(event)
 		if err == nil {
 			continue
 		}
-		failure := E.Errors(errTunnelConfiguration, E.Cause(err, "apply easyconnect tunnel configuration"))
-		c.configurationEventAccess.Lock()
-		c.configurationEventStopped = true
-		c.configurationEvents = nil
-		c.configurationEventAccess.Unlock()
+		failure := E.Errors(errTunnelEvent, E.Cause(err, "handle easyconnect tunnel event"))
+		c.tunnelEventAccess.Lock()
+		c.tunnelEventStopped = true
+		c.tunnelEvents = nil
+		c.tunnelEventAccess.Unlock()
 		c.lifecycleAccess.Lock()
 		session := c.currentSession
 		c.lifecycleAccess.Unlock()
@@ -389,12 +389,12 @@ func (c *Client) Close() error {
 		c.signalStateChangedLocked()
 		c.lifecycleAccess.Unlock()
 		c.incomingDataPackets.Close()
-		c.configurationEventAccess.Lock()
-		c.configurationEventStopped = true
-		c.configurationEvents = nil
-		c.configurationEventAccess.Unlock()
+		c.tunnelEventAccess.Lock()
+		c.tunnelEventStopped = true
+		c.tunnelEvents = nil
+		c.tunnelEventAccess.Unlock()
 		select {
-		case c.configurationEventWake <- struct{}{}:
+		case c.tunnelEventWake <- struct{}{}:
 		default:
 		}
 		if session != nil {
